@@ -61,6 +61,21 @@ async function mutate(method, url, payload) {
   return null;
 }
 
+function truncationNote(truncated) {
+  // 诊断路径限量展示: 任一列表触顶都需显式标记“仅显示部分路径”,
+  // 避免把数量/长度上限造成的未知误读为已隔离。
+  if (!truncated) return '';
+  const parts = [];
+  for (const key of ['live', 'blocked']) {
+    const t = truncated[key];
+    if (!t) continue;
+    const label = key === 'live' ? '未切断路径' : '被挂牌切断路径';
+    if (t.countLimited) parts.push(`${label}超过 ${t.limit} 条，仅展示前 ${t.limit} 条（判定不受上限影响）`);
+    if (t.lengthLimited) parts.push(`${label}存在超过 ${t.maxLength} 个节点的长路径，诊断展示已截断`);
+  }
+  return parts.length ? `⚠ ${parts.join('；')}。` : '';
+}
+
 function handleBusinessError(data) {
   const err = data.error || { message: '未知错误' };
   let msg = `✖ ${err.message}`;
@@ -73,6 +88,8 @@ function handleBusinessError(data) {
     for (const v of data.violations) {
       msg += `\n• 许可 #${v.permit_id}（${v.device_name}）将失去隔离`;
       paths.push(...v.livePaths);
+      const note = truncationNote(v.truncated);
+      if (note) msg += `\n  ${note}`;
     }
   }
   if (paths.length) {
@@ -83,9 +100,15 @@ function handleBusinessError(data) {
         return n.tagged ? `🔒${label}` : label;
       }).join(' → ');
     });
+    if (paths.length > 8) {
+      msg += `\n  …（另有 ${paths.length - 8} 条未在弹窗列出，图中已高亮）`;
+    }
     state.highlightPaths = paths.map((p) => p.nodes.map((n) => n.id));
     renderGraph();
   }
+  // 申请类失败的顶层截断标记
+  const note = truncationNote(data.truncated);
+  if (note) msg += `\n${note}`;
   toast(msg, 'error');
 }
 
@@ -288,11 +311,14 @@ function renderNodeDetail() {
     }
     buttons.push(['btn', '查看供电路径', async () => {
       const data = await apiGet(`/api/devices/${n.id}/paths`);
+      const note = truncationNote(data.truncated);
       if (data.livePaths.length === 0) {
-        toast(`「${n.name}」已隔离（无未切断路径）；被挂牌切断路径 ${data.blockedPaths.length} 条。`, 'success');
+        toast(`「${n.name}」已隔离（无未切断路径）；被挂牌切断路径 ${data.blockedPaths.length} 条。`
+          + (note ? `\n${note}` : ''), 'success');
         state.highlightPaths = data.blockedPaths.map((p) => p.nodes.map((x) => x.id));
       } else {
-        toast(`「${n.name}」存在 ${data.livePaths.length} 条未切断供电路径`, 'error');
+        toast(`「${n.name}」存在 ${data.livePaths.length} 条未切断供电路径（判定基于完整可达性分析，不随展示上限漏判）。`
+          + (note ? `\n${note}` : ''), 'error');
         state.highlightPaths = data.livePaths.map((p) => p.nodes.map((x) => x.id));
       }
       renderGraph();
@@ -330,11 +356,15 @@ function renderIsolationList() {
   box.innerHTML = snap.permits.map((p) => {
     const iso = snap.isolation[p.device_id];
     const ok = iso && iso.isolated;
+    const note = !ok ? truncationNote(iso && iso.truncated) : '';
     return `<div class="isolation-item ${ok ? 'ok' : 'bad'}">
       <b>#${p.id} ${escapeHtml(p.device_name)}</b><br>
       ${ok ? '✔ 隔离满足' : `✖ 仍有 ${iso ? iso.livePaths.length : 0} 条未切断路径`}
       ${ok ? '' : (iso.livePaths.slice(0, 3).map((path) =>
-        `<div class="path-line">${path.nodes.map((x) => x.name).join(' → ')}</div>`).join(''))}
+        `<div class="path-line">${path.nodes.map((x) => x.name).join(' → ')}</div>`).join('')
+        + (iso.livePaths.length > 3
+          ? `<div class="hint">…另有 ${iso.livePaths.length - 3} 条，仅列出前 3 条。</div>` : ''))}
+      ${note ? `<div class="path-truncated">${escapeHtml(note)}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -348,6 +378,7 @@ function renderPermits() {
     box.innerHTML = snap.permits.map((p) => {
       const iso = snap.isolation[p.device_id];
       const ok = iso && iso.isolated;
+      const note = ok ? '' : truncationNote(iso && iso.truncated);
       return `<div class="permit-card ${ok ? 'isolated' : 'violated'}">
         <div>
           <b>#${p.id} ${escapeHtml(p.device_name)}</b>
@@ -355,9 +386,13 @@ function renderPermits() {
             ${ok ? '✔ 已隔离' : '✖ 未隔离'}</div>
           <div class="permit-paths">${ok
             ? '<span class="hint">所有启用电源路径均经已挂牌开关。</span>'
-            : iso.livePaths.map((path) =>
-              `<div class="path-line">未切断：${path.nodes.map((n) => n.name).join(' → ')}</div>`).join('')}
+            : iso.livePaths.slice(0, 5).map((path) =>
+              `<div class="path-line">未切断：${path.nodes.map((n) => n.name).join(' → ')}</div>`).join('')
+              + (iso.livePaths.length > 5
+                ? `<div class="hint">…另有 ${iso.livePaths.length - 5} 条，仅列出前 5 条（隔离判定基于完整可达性分析）。</div>`
+                : '')}
           </div>
+          ${note ? `<div class="path-truncated">${escapeHtml(note)}</div>` : ''}
         </div>
         <button class="btn btn-sm btn-danger" onclick="endPermit(${p.id})">结束许可</button>
       </div>`;

@@ -77,7 +77,9 @@ function buildSnapshot() {
     isolation[p.device_id] = {
       isolated: r.isolated,
       livePaths: r.livePaths.map((pa) => serializePath(graph, pa)),
-      blockedPathCount: r.blockedPaths.length
+      blockedPathCount: r.blockedPaths.length,
+      // 诊断枚举若触顶会标记截断; isolated 由完整可达性分析得出, 与此标志无关
+      truncated: r.truncated
     };
   }
   return {
@@ -155,7 +157,8 @@ function runMutation(res, options) {
               permit_id: v.permit.id,
               device_id: v.permit.device_id,
               device_name: v.permit.device_name,
-              livePaths: v.livePaths.map((p) => serializePath(afterGraph, p))
+              livePaths: v.livePaths.map((p) => serializePath(afterGraph, p)),
+              truncated: v.truncated
             }))
           });
       }
@@ -199,8 +202,10 @@ app.get('/api/devices/:id/paths', wrap((req, res) => {
     device_id: id,
     device_name: node.name,
     isolated: r.isolated,
+    // 诊断路径限量展示; 触顶时 truncated 显式标记, isolated 以完整可达性为准
     livePaths: r.livePaths.map((p) => serializePath(graph, p)),
-    blockedPaths: r.blockedPaths.map((p) => serializePath(graph, p))
+    blockedPaths: r.blockedPaths.map((p) => serializePath(graph, p)),
+    truncated: r.truncated
   });
 }));
 
@@ -415,14 +420,16 @@ app.post('/api/permits', wrap((req, res) => {
       if (activePermits().some((p) => p.device_id === deviceId)) {
         throw new ApiError(422, 'PERMIT_EXISTS', '该设备已有有效检修许可');
       }
-      const { isolated, livePaths } = evaluateIsolation(graph, deviceId);
+      const { isolated, livePaths, truncated } = evaluateIsolation(graph, deviceId);
       if (!isolated) {
         throw new ApiError(422, 'PERMIT_NOT_ISOLATED',
           '许可申请失败: 仍存在未切断的供电路径, 请断开并挂牌相关开关',
           {
             device_id: deviceId,
             device_name: node.name,
-            livePaths: livePaths.map((p) => serializePath(graph, p))
+            livePaths: livePaths.map((p) => serializePath(graph, p)),
+            // 至少返回一条真实带电路径; 列表触顶时用 truncated 标记
+            truncated
           });
       }
       const info = db.prepare(
@@ -463,6 +470,7 @@ app.use((err, req, res, next) => {
     if (err.current) body.current = err.current;
     if (err.violations) body.violations = err.violations;
     if (err.livePaths) body.livePaths = err.livePaths;
+    if (err.truncated) body.truncated = err.truncated;
     if (err.device_id !== undefined) {
       body.device_id = err.device_id;
       body.device_name = err.device_name;
