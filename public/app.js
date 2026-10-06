@@ -61,6 +61,17 @@ async function mutate(method, url, payload) {
   return null;
 }
 
+function truncationNote(data) {
+  // data 可能是顶层错误响应, 也可能是 violations 中的单条
+  if (data && data.truncated) {
+    const parts = [];
+    if (data.totalTruncated) parts.push('路径条数达到展示上限');
+    if (data.lengthTruncated) parts.push('存在超长路径未展开');
+    return `\n⚠ ${parts.join('，')}：仅列出部分路径（已截断），但隔离判定为完整判定，拒绝结论不受影响。`;
+  }
+  return '';
+}
+
 function handleBusinessError(data) {
   const err = data.error || { message: '未知错误' };
   let msg = `✖ ${err.message}`;
@@ -68,21 +79,24 @@ function handleBusinessError(data) {
 
   if (data.livePaths) {
     paths.push(...data.livePaths);
+    msg += truncationNote(data);
   }
   if (data.violations) {
     for (const v of data.violations) {
       msg += `\n• 许可 #${v.permit_id}（${v.device_name}）将失去隔离`;
+      msg += truncationNote(v);
       paths.push(...v.livePaths);
     }
   }
   if (paths.length) {
-    msg += '\n未切断路径：';
+    msg += '\n实际带电（未切断）路径：';
     paths.slice(0, 8).forEach((p, i) => {
       msg += `\n  ${i + 1}) ` + p.nodes.map((n) => {
         const label = `${n.name}`;
         return n.tagged ? `🔒${label}` : label;
       }).join(' → ');
     });
+    if (paths.length > 8) msg += `\n  …其余 ${paths.length - 8} 条未展开`;
     state.highlightPaths = paths.map((p) => p.nodes.map((n) => n.id));
     renderGraph();
   }
@@ -288,11 +302,18 @@ function renderNodeDetail() {
     }
     buttons.push(['btn', '查看供电路径', async () => {
       const data = await apiGet(`/api/devices/${n.id}/paths`);
+      const truncParts = [];
+      if (data.totalTruncated) truncParts.push(`枚举达到 ${data.maxPaths} 条展示上限`);
+      if (data.lengthTruncated) truncParts.push(`存在超过 ${data.maxPathLen} 个节点的超长路径未展开`);
+      const truncNote = truncParts.length
+        ? `\n⚠ ${truncParts.join('；')}，仅展示部分路径（已截断）；隔离判定为完整判定，不受上限影响。`
+        : '';
       if (data.livePaths.length === 0) {
-        toast(`「${n.name}」已隔离（无未切断路径）；被挂牌切断路径 ${data.blockedPaths.length} 条。`, 'success');
+        toast(`「${n.name}」已隔离（无未切断路径）；被挂牌切断路径 ${data.blockedPaths.length} 条。${truncNote}`,
+          truncParts.length ? 'info' : 'success');
         state.highlightPaths = data.blockedPaths.map((p) => p.nodes.map((x) => x.id));
       } else {
-        toast(`「${n.name}」存在 ${data.livePaths.length} 条未切断供电路径`, 'error');
+        toast(`「${n.name}」存在 ${data.livePaths.length} 条未切断供电路径${truncNote}`, 'error');
         state.highlightPaths = data.livePaths.map((p) => p.nodes.map((x) => x.id));
       }
       renderGraph();
@@ -335,6 +356,7 @@ function renderIsolationList() {
       ${ok ? '✔ 隔离满足' : `✖ 仍有 ${iso ? iso.livePaths.length : 0} 条未切断路径`}
       ${ok ? '' : (iso.livePaths.slice(0, 3).map((path) =>
         `<div class="path-line">${path.nodes.map((x) => x.name).join(' → ')}</div>`).join(''))}
+      ${iso && iso.truncated ? '<div class="path-trunc">⚠ 路径展示已截断（判定为完整判定）</div>' : ''}
     </div>`;
   }).join('');
 }
@@ -358,6 +380,9 @@ function renderPermits() {
             : iso.livePaths.map((path) =>
               `<div class="path-line">未切断：${path.nodes.map((n) => n.name).join(' → ')}</div>`).join('')}
           </div>
+          ${iso.truncated
+            ? '<div class="path-trunc">⚠ 路径枚举达到展示上限已截断；隔离判定为完整可达性判定，拒绝结论不受影响。</div>'
+            : ''}
         </div>
         <button class="btn btn-sm btn-danger" onclick="endPermit(${p.id})">结束许可</button>
       </div>`;
@@ -454,7 +479,8 @@ function toast(message, kind) {
   el.className = `toast-msg toast-${kind}`;
   el.textContent = message;
   $('toast').appendChild(el);
-  setTimeout(() => el.remove(), 7000);
+  // 拒绝原因可能含多条路径, 错误提示停留更久
+  setTimeout(() => el.remove(), kind === 'error' ? 15000 : 7000);
 }
 
 function escapeHtml(s) {

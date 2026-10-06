@@ -108,6 +108,7 @@ h3 { margin: 0 0 10px; font-size: 15px; }
 .isolation-item.ok { background: #ecfdf5; border: 1px solid #6ee7b7; }
 .isolation-item.bad { background: #fff1f2; border: 1px solid #fda4af; }
 .path-line { font-family: ui-monospace, monospace; margin-top: 4px; color: #9a3412; word-break: break-all; }
+.path-trunc { margin-top: 4px; font-size: 11px; color: #92400e; }
 .hint { color: #6b7280; font-size: 12px; }
 
 /* 表单与表格 */

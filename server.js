@@ -6,7 +6,9 @@ const { openDb, initSchema, seedDemo } = require('./src/db');
 const {
   evaluateIsolation,
   validateActivePermits,
-  serializePath
+  serializePath,
+  MAX_PATHS,
+  MAX_PATH_LEN
 } = require('./src/graph');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -77,7 +79,11 @@ function buildSnapshot() {
     isolation[p.device_id] = {
       isolated: r.isolated,
       livePaths: r.livePaths.map((pa) => serializePath(graph, pa)),
-      blockedPathCount: r.blockedPaths.length
+      blockedPathCount: r.blockedPaths.length,
+      // 诊断枚举是否触顶; isolated 为精确判定, 不受该标记影响
+      truncated: r.truncated,
+      totalTruncated: r.totalTruncated,
+      lengthTruncated: r.lengthTruncated
     };
   }
   return {
@@ -155,7 +161,11 @@ function runMutation(res, options) {
               permit_id: v.permit.id,
               device_id: v.permit.device_id,
               device_name: v.permit.device_name,
-              livePaths: v.livePaths.map((p) => serializePath(afterGraph, p))
+              livePaths: v.livePaths.map((p) => serializePath(afterGraph, p)),
+              // 展示枚举可能已截断; 拒绝本身基于精确判定, 且至少含一条实际带电路径
+              truncated: v.truncated,
+              totalTruncated: v.totalTruncated,
+              lengthTruncated: v.lengthTruncated
             }))
           });
       }
@@ -200,7 +210,13 @@ app.get('/api/devices/:id/paths', wrap((req, res) => {
     device_name: node.name,
     isolated: r.isolated,
     livePaths: r.livePaths.map((p) => serializePath(graph, p)),
-    blockedPaths: r.blockedPaths.map((p) => serializePath(graph, p))
+    blockedPaths: r.blockedPaths.map((p) => serializePath(graph, p)),
+    // 路径诊断为有界枚举: 截断时显式标记, 未列出的路径不代表不存在
+    truncated: r.truncated,
+    totalTruncated: r.totalTruncated,
+    lengthTruncated: r.lengthTruncated,
+    maxPaths: MAX_PATHS,
+    maxPathLen: MAX_PATH_LEN
   });
 }));
 
@@ -415,14 +431,18 @@ app.post('/api/permits', wrap((req, res) => {
       if (activePermits().some((p) => p.device_id === deviceId)) {
         throw new ApiError(422, 'PERMIT_EXISTS', '该设备已有有效检修许可');
       }
-      const { isolated, livePaths } = evaluateIsolation(graph, deviceId);
-      if (!isolated) {
+      const r = evaluateIsolation(graph, deviceId);
+      if (!r.isolated) {
         throw new ApiError(422, 'PERMIT_NOT_ISOLATED',
           '许可申请失败: 仍存在未切断的供电路径, 请断开并挂牌相关开关',
           {
             device_id: deviceId,
             device_name: node.name,
-            livePaths: livePaths.map((p) => serializePath(graph, p))
+            livePaths: r.livePaths.map((p) => serializePath(graph, p)),
+            // 展示枚举可能已截断; 拒绝基于精确判定, livePaths 至少含一条实际带电路径
+            truncated: r.truncated,
+            totalTruncated: r.totalTruncated,
+            lengthTruncated: r.lengthTruncated
           });
       }
       const info = db.prepare(
@@ -463,6 +483,11 @@ app.use((err, req, res, next) => {
     if (err.current) body.current = err.current;
     if (err.violations) body.violations = err.violations;
     if (err.livePaths) body.livePaths = err.livePaths;
+    if (err.truncated !== undefined) {
+      body.truncated = err.truncated;
+      body.totalTruncated = err.totalTruncated;
+      body.lengthTruncated = err.lengthTruncated;
+    }
     if (err.device_id !== undefined) {
       body.device_id = err.device_id;
       body.device_name = err.device_name;
